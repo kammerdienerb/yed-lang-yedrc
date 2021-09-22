@@ -1,67 +1,104 @@
 #include <yed/plugin.h>
 
+#include <yed/tree.h>
+typedef char *yedrc_path_t;
+use_tree_c(yedrc_path_t, int, strcmp);
+
+
+#include <stdio.h>
+
+
+tree(yedrc_path_t, int) loading;
+
+void yedrc_load(int n_args, char **args) {
+    char                       *path;
+    char                        exp_path[512];
+    char                        abs_path[4096];
+    tree_it(yedrc_path_t, int)  it;
+    FILE                       *f;
+    char                        line[512];
+    char                        line_accum[4096];
+    char                       *bw_scan;
+    int                         bs_cont;
+    array_t                     split;
+
+    if (n_args != 1) {
+        yed_cerr("expected 1 argument but got %d", n_args);
+        return;
+    }
+
+    yed_cprint("'%s'\n", args[0]);
+
+    path = args[0];
+    expand_path(path, exp_path);
+    path = exp_path;
+
+    f = fopen(path, "r");
+
+    if (!f) {
+        yed_cerr("unable to open yedrc file '%s'", args[0]);
+        return;
+    }
+
+    path = realpath(exp_path, abs_path);
+
+    if (!path) {
+        yed_cerr("invalid path to yedrc file '%s'", args[0]);
+        return;
+    }
+
+    it = tree_lookup(loading, path);
+    if (tree_it_good(it)) {
+        yed_cerr("yedrc file '%s' is recursive! aborting load", args[0]);
+        return;
+    }
+
+    yed_cprint("executing '%s'", args[0]);
+
+    tree_insert(loading, path, 1);
+
+    line_accum[0] = 0;
+    while (fgets(line, sizeof(line), f)) {
+        strncat(line_accum, line, sizeof(line_accum) - strlen(line_accum) - 1);
+
+        bw_scan = line_accum + strlen(line_accum) - 1;
+        while (bw_scan >= line_accum && isspace(*bw_scan)) { bw_scan -= 1; }
+        bs_cont = *bw_scan == '\\';
+
+        if (bs_cont) {
+            *bw_scan = ' ';
+        } else {
+            split = sh_split(line_accum);
+            if (array_len(split)) {
+                yed_execute_command_from_split(split);
+            }
+            free_string_array(split);
+            line_accum[0] = 0;
+        }
+    }
+
+    tree_delete(loading, path);
+
+    yed_cprint("done loading '%s'", args[0]);
+
+    fclose(f);
+}
+
+
 void unload(yed_plugin *self);
-void maybe_change_ft(yed_buffer *buff);
-void maybe_change_ft_event(yed_event *event);
 
 int yed_plugin_boot(yed_plugin *self) {
-    tree_it(yed_buffer_name_t, yed_buffer_ptr_t) bit;
-    yed_event_handler                            buff_post_load_handler;
-    yed_event_handler                            buff_pre_write_handler;
-
     YED_PLUG_VERSION_CHECK();
 
-LOG_FN_ENTER();
     yed_plugin_set_unload_fn(self, unload);
 
-    if (yed_plugin_make_ft(self, "yedrc") == FT_ERR_TAKEN) {
-        yed_cerr("lang/yedrc: unable to create file type name");
-        LOG_EXIT();
-        return 1;
-    }
+    loading = tree_make(yedrc_path_t, int);
 
-    buff_post_load_handler.kind = EVENT_BUFFER_POST_LOAD;
-    buff_post_load_handler.fn   = maybe_change_ft_event;
-    buff_pre_write_handler.kind = EVENT_BUFFER_PRE_WRITE;
-    buff_pre_write_handler.fn   = maybe_change_ft_event;
+    yed_plugin_set_command(self, "yedrc-load", yedrc_load);
 
-    yed_plugin_add_event_handler(self, buff_post_load_handler);
-    yed_plugin_add_event_handler(self, buff_pre_write_handler);
-
-    tree_traverse(ys->buffers, bit) {
-        maybe_change_ft(tree_it_val(bit));
-    }
-
-LOG_EXIT();
     return 0;
 }
 
-void unload(yed_plugin *self) {}
-
-void maybe_change_ft(yed_buffer *buff) {
-    char *ext;
-    char *base;
-
-    if (buff->ft != FT_UNKNOWN) {
-        return;
-    }
-    if (buff->path == NULL) {
-        return;
-    }
-    if ((ext = get_path_ext(buff->path)) != NULL) {
-        if (strcmp(ext, "yedrc") == 0) {
-            yed_buffer_set_ft(buff, yed_get_ft("yedrc"));
-        }
-    }
-    if ((base = get_path_basename(buff->path)) != NULL) {
-        if (strcmp(base, "yedrc") == 0) {
-            yed_buffer_set_ft(buff, yed_get_ft("yedrc"));
-        }
-    }
-}
-
-void maybe_change_ft_event(yed_event *event) {
-    if (event->buffer) {
-        maybe_change_ft(event->buffer);
-    }
+void unload(yed_plugin *self) {
+    tree_free(loading);
 }
